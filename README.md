@@ -29,16 +29,11 @@ Basically, if you're tired of just *using* tools and want to feel the thrill of 
 IgnisDB has a pretty straightforward and clean design, which is great because it means it's easy to understand. When a client sends a command, here's the epic journey it takes through our system:
 
 ```
-
-[Client] ---\> [TCP Server] ---\> [Protocol Parser] \<---\> [Storage Engine]
-^                |                   |                      |
-|          (The Bouncer)     (The Translator)         (The Librarian)
-|                                                           |
-\+-----------------------------------------------------------+
-|
-[Response]
-
-````
+                  +--------------+      +-----------------+      +----------------+
+[Client] <------> |  TCP Server  |----->| Protocol Parser |----->| Storage Engine |
+                  +--------------+      +-----------------+      +----------------+
+                  (The Bouncer)         (The Translator)         (The Librarian)
+```
 
 1.  **The TCP Server (The Front Door)**: This is our bouncer. It stands at the door, listening for new clients who want to connect. For every new friend that knocks, it says "Welcome!" and starts a new, dedicated task to listen to their requests, so everyone gets attention without waiting in line.
 2.  **The Protocol Parser (The Translator)**: Computers love to talk in bytes, but humans prefer words! This part is our universal translator. It takes the raw, garbled data from the client and translates it into clean commands and arguments that the rest of our application can easily understand, like `GET my_key`.
@@ -65,7 +60,7 @@ IgnisDB has a pretty straightforward and clean design, which is great because it
 
 1.  **Clone the project:**
     ```bash
-    git clone https://github.com/buraksocial/IgnisDB.git
+    git clone [https://github.com/buraksocial/IgnisDB.git](https://github.com/buraksocial/IgnisDB.git)
     cd IgnisDB
     ```
 2.  **Install the stuff it needs:**
@@ -122,23 +117,23 @@ Here's how you can talk to IgnisDB. Just send these commands as plain text.
 Want to make sure everything is working as it should? Or maybe you've added a new feature and want to be sure you didn't break anything? Just run the tests.
 ```bash
 pytest
-````
+```
 
 ### 🗺️ What's Next? (The Roadmap)
 
-This project is always a work in progress\! Here are a few ideas for cool features we could add next. They are great starting points if you want to contribute\!
+This project is always a work in progress! Here are a few ideas for cool features we could add next. They are great starting points if you want to contribute!
 
-  - [ ] **Add more data types, like Lists and Hashes.** This would make the database much more powerful, allowing you to do more than just store simple strings.
-  - [ ] **Create a different way to save data (Append-Only File).** This is an alternative to snapshotting where every single write command is logged to a file. It's great for durability\!
-  - [ ] **Build a simple replication system (master-slave).** This is a huge step towards a "real" database. It means you can have a backup database ready to take over if the main one has a problem.
-  - [ ] **Add support for transactions (`MULTI`/`EXEC`).** This would let you group multiple commands together so they all run at once, or not at all.
-  - [ ] **Create a tool to see how fast it really is\!** A simple benchmarking script would be awesome to measure performance and see how our changes impact speed.
+-   [ ] **Add more data types, like Lists and Hashes.** This would make the database much more powerful, allowing you to do more than just store simple strings.
+-   [ ] **Create a different way to save data (Append-Only File).** This is an alternative to snapshotting where every single write command is logged to a file. It's great for durability!
+-   [ ] **Build a simple replication system (master-slave).** This is a huge step towards a "real" database. It means you can have a backup database ready to take over if the main one has a problem.
+-   [ ] **Add support for transactions (`MULTI`/`EXEC`).** This would let you group multiple commands together so they all run at once, or not at all.
+-   [ ] **Create a tool to see how fast it really is!** A simple benchmarking script would be awesome to measure performance and see how our changes impact speed.
 
 ### 🤝 Want to Help Out?
 
-Yes, please\! Contributions are always welcome and are the best way to make this project even better. Feel free to open an issue to chat about an idea or just submit a pull request. No contribution is too small—even fixing a typo in the documentation is a huge help\!
+Yes, please! Contributions are always welcome and are the best way to make this project even better. Feel free to open an issue to chat about an idea or just submit a pull request. No contribution is too small—even fixing a typo in the documentation is a huge help!
 
-A great place to start is our [Issues tab](https://github.com/buraksocial/IgnisDB/issues)—look for anything with the `good first issue` label\!
+A great place to start is our [Issues tab](https://github.com/buraksocial/IgnisDB/issues)—look for anything with the `good first issue` label!
 
 1.  Fork the project.
 2.  Create a new branch (`git checkout -b feature/my-cool-idea`).
