@@ -138,7 +138,7 @@ This project is always a work in progress\! Here are a few ideas for cool featur
 
 Yes, please\! Contributions are always welcome and are the best way to make this project even better. Feel free to open an issue to chat about an idea or just submit a pull request. No contribution is too small—even fixing a typo in the documentation is a huge help\!
 
-A great place to start is our [Issues tab](https://www.google.com/url?sa=E&source=gmail&q=https://github.com/buraksocial/IgnisDB/issues)—look for anything with the `good first issue` label\!
+A great place to start is our [Issues tab](https://github.com/buraksocial/IgnisDB/issues)—look for anything with the `good first issue` label\!
 
 1.  Fork the project.
 2.  Create a new branch (`git checkout -b feature/my-cool-idea`).
