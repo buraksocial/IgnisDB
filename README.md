@@ -28,63 +28,62 @@ Basically, if you're tired of just *using* tools and want to feel the thrill of 
 
 IgnisDB has a pretty straightforward and clean design, which is great because it means it's easy to understand. When a client sends a command, here's the epic journey it takes through our system:
 
-```
-
-```
-              +--------------+      +-----------------+      +----------------+
-```
-
-[Client] \<------\> |  TCP Server  |-----\>| Protocol Parser |-----\>| Storage Engine |
-\+--------------+      +-----------------+      +----------------+
-(The Bouncer)         (The Translator)         (The Librarian)
-
+```text
+                  +--------------+      +-----------------+      +----------------+
+[Client] <------> |  TCP Server  |----->| Protocol Parser |----->| Storage Engine |
+                  | (The Bouncer)|      | (The Translator)|      |  (The Brains)  |
+                  +--------------+      +-----------------+      +----------------+
 ````
 
-1.  **The TCP Server (The Front Door)**: This is our bouncer. It stands at the door, listening for new clients who want to connect. For every new friend that knocks, it says "Welcome!" and starts a new, dedicated task to listen to their requests, so everyone gets attention without waiting in line.
-2.  **The Protocol Parser (The Translator)**: Computers love to talk in bytes, but humans prefer words! This part is our universal translator. It takes the raw, garbled data from the client and translates it into clean commands and arguments that the rest of our application can easily understand, like `GET my_key`.
+1.  **The TCP Server (The Front Door)**: This is our bouncer. It stands at the door, listening for new clients who want to connect. For every new friend that knocks, it says "Welcome\!" and starts a new, dedicated task to listen to their requests, so everyone gets attention without waiting in line.
+2.  **The Protocol Parser (The Translator)**: Computers love to talk in bytes, but humans prefer words\! This part is our universal translator. It takes the raw, garbled data from the client and translates it into clean commands and arguments that the rest of our application can easily understand, like `GET my_key`.
 3.  **The Storage Engine (The Brains)**: This is the heart and soul of the database. It takes the translated commands and actually does the work—storing data, fetching it, deleting it, and so on. It's also the super-organized librarian who knows exactly where every piece of information is and uses a special `Lock` to make sure that even if two people ask for the same book at once, there's no chaos.
-4.  **The Response (Sending it back!)**: Once the engine has an answer (or a confirmation), the parser formats it back into a response the client can understand and sends it back over the wire. Job done!
+4.  **The Response (Sending it back\!)**: Once the engine has an answer (or a confirmation), the parser formats it back into a response the client can understand and sends it back over the wire. Job done\!
 
 ### 🚀 What's Inside? (The Cool Features)
 
-* **Totally Async & Efficient**: Thanks to `asyncio`, IgnisDB can juggle tons of connections at once without breaking a sweat. It's super efficient because it doesn't wait around.
-* **Flexible In-Memory Storage**: We support Strings, Lists, and Hashes, making it more than just a simple key-value store. Everything is in RAM, which means lightning-fast operations.
-* **Dual-Mode Data Persistence**: Choose your durability strategy!
-    * **Snapshotting**: Periodically save a "snapshot" of all data to a file.
-    * **Append-Only File (AOF)**: Log every write command to a file for finer-grained durability.
-* **Atomic Transactions**: Group multiple commands into a single, all-or-nothing operation using `MULTI` and `EXEC`. This guarantees data consistency during complex operations.
-* **Master-Slave Replication**: Scale your reads and improve availability. A master server handles writes and propagates them to one or more read-only slave replicas.
-* **Automatic Key Expiration (TTL)**: Set keys to automatically disappear after a certain amount of time. Super useful for caches and session data.
-* **Guaranteed Concurrency Safe**: We use `asyncio.Lock` to enforce a "one at a time, please!" rule for write operations, preventing data corruption.
-* **Clean and Tidy Code**: We've intentionally kept the project split into logical parts, making it easy to read, understand, and extend.
+  * **Totally Async & Efficient**: Thanks to `asyncio`, IgnisDB can juggle tons of connections at once without breaking a sweat. It's super efficient because it doesn't wait around.
+  * **Flexible In-Memory Storage**: We support Strings, Lists, and Hashes, making it more than just a simple key-value store. Everything is in RAM, which means lightning-fast operations.
+  * **Dual-Mode Data Persistence**: Choose your durability strategy\!
+      * **Snapshotting**: Periodically save a "snapshot" of all data to a file.
+      * **Append-Only File (AOF)**: Log every write command to a file for finer-grained durability.
+  * **Atomic Transactions**: Group multiple commands into a single, all-or-nothing operation using `MULTI` and `EXEC`. This guarantees data consistency during complex operations.
+  * **Master-Slave Replication**: Scale your reads and improve availability. A master server handles writes and propagates them to one or more read-only slave replicas.
+  * **Automatic Key Expiration (TTL)**: Set keys to automatically disappear after a certain amount of time. Super useful for caches and session data.
+  * **Guaranteed Concurrency Safe**: We use `asyncio.Lock` to enforce a "one at a time, please\!" rule for write operations, preventing data corruption.
+  * **Clean and Tidy Code**: We've intentionally kept the project split into logical parts, making it easy to read, understand, and extend.
 
 ### 🛠️ The Tech We're Using
 
-* **Language**: Python 3.9+
-* **Core Library**: `asyncio`
-* **Testing**: `pytest` and `pytest-asyncio`
+  * **Language**: Python 3.9+
+  * **Core Library**: `asyncio`
+  * **Testing**: `pytest` and `pytest-asyncio`
 
-### ⚙️ Get It Running!
+### ⚙️ Get It Running\!
 
 1.  **Clone the project:**
+
     ```bash
     git clone [https://github.com/buraksocial/IgnisDB.git](https://github.com/buraksocial/IgnisDB.git)
     cd IgnisDB
     ```
+
 2.  **Install dependencies (optional, no external libraries needed):**
+
     ```bash
     # It's always a good idea to use a virtual environment!
     python -m venv venv
     source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
     ```
-3.  **Fire up the server!**
+
+3.  **Fire up the server\!**
     You can run the server in different modes.
 
-    * **As a Master (default):**
+      * **As a Master (default):**
         ```bash
         python ignisdb_server.py
         ```
-    * **As a Slave Replica:**
+      * **As a Slave Replica:**
         (Assuming a master is running on the default port 6380)
         ```bash
         python ignisdb_server.py --role slave --port 6381
@@ -92,10 +91,13 @@ IgnisDB has a pretty straightforward and clean design, which is great because it
 
 4.  **Talk to it:**
     Open a brand new terminal window and use `telnet` to connect:
+
     ```bash
     telnet 127.0.0.1 6380
     ```
-    Now you have a direct line to the database. You can start sending commands!
+
+    Now you have a direct line to the database. You can start sending commands\!
+
     ```
     # Set a key
     SET name 'John Doe'
@@ -115,20 +117,20 @@ IgnisDB has a pretty straightforward and clean design, which is great because it
 
 ### 🗺️ What's Next? (The New Roadmap)
 
-This project is always a work in progress! We've completed the initial roadmap and now have our sights set on even more advanced features. These are great starting points if you want to contribute!
+This project is always a work in progress\! We've completed the initial roadmap and now have our sights set on even more advanced features. These are great starting points if you want to contribute\!
 
--   [ ] **Build a Benchmarking Tool:** Create a separate script to measure the server's performance (ops/sec) for various commands to see how our changes impact speed.
--   [ ] **Add More Data Structures (e.g., Sets):** Implement the Set data structure with commands like `SADD`, `SMEMBERS`, and `SISMEMBER` for handling unique, unordered collections.
--   [ ] **Implement a Pub/Sub System:** Add `PUBLISH` and `SUBSCRIBE` commands to allow for real-time, channel-based messaging patterns, turning IgnisDB into a message broker.
--   [ ] **Add Security with Authentication:** Introduce an `AUTH <password>` command to require clients to authenticate before executing other commands.
--   [ ] **Implement AOF Compaction/Rewrite:** Add a mechanism to intelligently rewrite the Append-Only File to keep its size manageable over time without losing data.
--   [ ] **Improve Replication:** Make the replication system more robust with features like Partial Resynchronization (PSYNC) and better error handling during network splits.
+  * [ ] **Build a Benchmarking Tool:** Create a separate script to measure the server's performance (ops/sec) for various commands to see how our changes impact speed.
+  * [ ] **Add More Data Structures (e.g., Sets):** Implement the Set data structure with commands like `SADD`, `SMEMBERS`, and `SISMEMBER` for handling unique, unordered collections.
+  * [ ] **Implement a Pub/Sub System:** Add `PUBLISH` and `SUBSCRIBE` commands to allow for real-time, channel-based messaging patterns, turning IgnisDB into a message broker.
+  * [ ] **Add Security with Authentication:** Introduce an `AUTH <password>` command to require clients to authenticate before executing other commands.
+  * [ ] **Implement AOF Compaction/Rewrite:** Add a mechanism to intelligently rewrite the Append-Only File to keep its size manageable over time without losing data.
+  * [ ] **Improve Replication:** Make the replication system more robust with features like Partial Resynchronization (PSYNC) and better error handling during network splits.
 
 ### 🤝 Want to Help Out?
 
-Yes, please! Contributions are always welcome and are the best way to make this project even better. Feel free to open an issue to chat about an idea or just submit a pull request. No contribution is too small—even fixing a typo in the documentation is a huge help!
+Yes, please\! Contributions are always welcome and are the best way to make this project even better. Feel free to open an issue to chat about an idea or just submit a pull request. No contribution is too small—even fixing a typo in the documentation is a huge help\!
 
-A great place to start is our [Issues tab](https://github.com/buraksocial/IgnisDB/issues)—look for anything with the `good first issue` label!
+A great place to start is our [Issues tab](https://github.com/buraksocial/IgnisDB/issues)—look for anything with the `good first issue` label\!
 
 1.  Fork the project.
 2.  Create a new branch (`git checkout -b feature/my-cool-idea`).
