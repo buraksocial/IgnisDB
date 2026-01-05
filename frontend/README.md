@@ -1,4 +1,4 @@
-# 🔥 IgnisDB Team Tasks - Real-Time Collaborative Todo Manager
+# IgnisDB Team Tasks - Real-Time Collaborative Todo Manager
 
 [![GitHub stars](https://img.shields.io/github/stars/buraksocial/IgnisDB?style=social)](https://github.com/buraksocial/IgnisDB/stargazers)
 [![GitHub stars](https://img.shields.io/github/stars/Giathi-Daniel/IgnisDB?style=social)](https://github.com/Giathi-Daniel/IgnisDB/stargazers)
@@ -9,7 +9,7 @@
 
 > A real-time collaborative todo/task manager built with React, WebSockets, and IgnisDB.
 
-Welcome to **IgnisDB Team Tasks**! This is the official web frontend for the IgnisDB project—a real-time collaborative task manager that demonstrates how modern web applications stay in sync across multiple users. Whether you're a developer learning about WebSockets and real-time databases, or a team looking for a lightweight task management tool, this application has something for you.
+Welcome to **IgnisDB Team Tasks**! This is the official simple web frontend for the IgnisDB project—a real-time collaborative task manager that demonstrates how modern web applications stay in sync across multiple users. Whether you're a developer learning about WebSockets and real-time databases, or a team looking for a lightweight task management tool, this application has something for you.
 
 The frontend connects seamlessly to the IgnisDB backend through a WebSocket bridge server, allowing team members to add, update, and complete tasks while seeing changes instantly. Everything is stored persistently in both the database and your browser's local storage, so you never lose your data.
 
