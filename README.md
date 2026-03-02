@@ -118,12 +118,17 @@ IgnisDB has a pretty straightforward and clean design, which is great because it
 
 This project is always a work in progress\! We've completed the initial roadmap and now have our sights set on even more advanced features. These are great starting points if you want to contribute\!
 
-  * [ ] **Build a Benchmarking Tool:** Create a separate script to measure the server's performance (ops/sec) for various commands to see how our changes impact speed.
-  * [ ] **Add More Data Structures (e.g., Sets):** Implement the Set data structure with commands like `SADD`, `SMEMBERS`, and `SISMEMBER` for handling unique, unordered collections.
-  * [ ] **Implement a Pub/Sub System:** Add `PUBLISH` and `SUBSCRIBE` commands to allow for real-time, channel-based messaging patterns, turning IgnisDB into a message broker.
-  * [ ] **Add Security with Authentication:** Introduce an `AUTH <password>` command to require clients to authenticate before executing other commands.
-  * [ ] **Implement AOF Compaction/Rewrite:** Add a mechanism to intelligently rewrite the Append-Only File to keep its size manageable over time without losing data.
-  * [ ] **Improve Replication:** Make the replication system more robust with features like Partial Resynchronization (PSYNC) and better error handling during network splits.
+  * [x] **Build a Benchmarking Tool:** Create a separate script to measure the server's performance (ops/sec) for various commands to see how our changes impact speed.
+  * [x] **Add More Data Structures (e.g., Sets):** Implement the Set data structure with commands like `SADD`, `SMEMBERS`, and `SISMEMBER` for handling unique, unordered collections.
+  * [x] **Implement a Pub/Sub System:** Add `PUBLISH` and `SUBSCRIBE` commands to allow for real-time, channel-based messaging patterns, turning IgnisDB into a message broker.
+  * [x] **Add Security with Authentication:** Introduce an `AUTH <password>` command to require clients to authenticate before executing other commands.
+  * [x] **Implement AOF Compaction/Rewrite:** Add a mechanism to intelligently rewrite the Append-Only File to keep its size manageable over time without losing data.
+  * [x] **Improve Replication:** Make the replication system more robust with features like Partial Resynchronization (PSYNC) and better error handling during network splits.
+
+### 🔮 Future Ideas
+  * [ ] **Add Geospacial Indexes:** Allow storing and querying geolocation data.
+  * [ ] **Implement Lua Scripting:** Let clients run complex logic atomically right inside the database.
+  * [ ] **Create a Web Dashboard:** Build a simple UI to see metrics and manage the database.
 
 ### 🤝 Want to Help Out?
 
