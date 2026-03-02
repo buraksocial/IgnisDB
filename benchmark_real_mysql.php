@@ -4,9 +4,9 @@
 // Update these with your LOCAL/REAL MySQL credentials
 $host = '127.0.0.1';
 $port = 3306; // Default MySQL Port
-$user = 'lirakazan_admin';
-$pass = 'EAeDbotyyg2m54_^';
-$db = 'lirakazan_veritabani'; // Change to your real DB name
+$user = 'root';
+$pass = 'Passw123!';
+$db = 'root_database'; // Change to your real DB name
 
 $iterations = 10000;
 
