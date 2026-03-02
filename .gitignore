@@ -1,0 +1,26 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.env
+
+# Ignoring DS_Store
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# IgnisDB
+*.ignis
+*.aof
+*.sql
+*.log
+*.err
+test_output.txt
+ignisdb_snapshot.json
