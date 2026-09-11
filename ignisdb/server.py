@@ -34,6 +34,7 @@ class IgnisServer:
         self.pubsub = PubSubManager()
         self.security = SecurityManager(encryption_key)
         self.replicas = set() # Set of writers (replicas)
+        self._snapshot_task = None
 
         # Pre-instantiate commands for performance (Singleton-like usage)
         self.command_handlers = {}
@@ -49,7 +50,12 @@ class IgnisServer:
             data = self.snapshot_handler.load()
             await self.storage.load_data(data)
             if self.snapshot_interval > 0:
-                asyncio.create_task(periodic_snapshot(self.storage, self.snapshot_interval))
+                # Keep a reference: a bare create_task() may be garbage
+                # collected mid-flight while the loop still holds only a weak
+                # reference to it.
+                self._snapshot_task = asyncio.create_task(
+                    periodic_snapshot(self.storage, self.snapshot_handler, self.snapshot_interval)
+                )
         elif self.persistence_mode == 'aof':
             logging.info("Replaying AOF...")
             commands = self.aof_handler.load()
@@ -345,5 +351,19 @@ class IgnisServer:
             await server.serve_forever()
 
     def shutdown(self):
+        """Flushes pending state to disk. Safe to call more than once."""
+        if self._snapshot_task is not None:
+            self._snapshot_task.cancel()
+            self._snapshot_task = None
+
+        if self.persistence_mode == 'snapshot':
+            # Without this, every write since the last interval tick is lost on
+            # a clean shutdown.
+            try:
+                logger.info("Saving final snapshot before shutdown...")
+                self.snapshot_handler.save(self.storage.snapshot())
+            except Exception:
+                logger.exception("Failed to save snapshot during shutdown.")
+
         if self.aof_handler:
             self.aof_handler.close()
