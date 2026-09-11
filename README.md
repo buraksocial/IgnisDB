@@ -89,7 +89,14 @@ IgnisDB has a pretty straightforward and clean design, which is great because it
         python main.py --port 6381
         ```
 
-4.  **Talk to it:**
+4.  **Run the tests:**
+
+    ```bash
+    pip install -r requirements-dev.txt
+    pytest
+    ```
+
+5.  **Talk to it:**
     Open a brand new terminal window and use `telnet` to connect:
 
     ```bash
