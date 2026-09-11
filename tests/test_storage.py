@@ -40,6 +40,20 @@ def test_expired_key_is_not_readable():
     run(scenario())
 
 
+def test_delete_expired_key_reports_zero():
+    """DEL reports how many keys it actually removed.
+
+    An already-expired key is logically gone, so the answer is 0; reporting 1
+    makes the reply indistinguishable from deleting a live key.
+    """
+    async def scenario():
+        storage = StorageEngine()
+        await storage.set("temp", "value", expire_seconds=-1)
+        assert await storage.delete("temp") == 0
+
+    run(scenario())
+
+
 def test_delete_live_key_reports_one():
     async def scenario():
         storage = StorageEngine()

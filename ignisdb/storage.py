@@ -41,7 +41,8 @@ class StorageEngine:
         return "OK"
 
     async def delete(self, key: str) -> int:
-        if self._check_and_delete_expired(key): return 1
+        # An already-expired key is logically absent, so nothing was removed.
+        if self._check_and_delete_expired(key): return 0
         if key in self._data:
             del self._data[key]
             return 1

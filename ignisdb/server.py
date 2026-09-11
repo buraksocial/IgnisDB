@@ -89,7 +89,7 @@ class IgnisServer:
         command_handlers = self.command_handlers
         storage = self.storage
         aof = self.aof_handler
-        write_cmds = {'SET', 'DELETE', 'EXPIRE', 'LPUSH', 'HSET', 'SADD', 'SREM'}
+        write_cmds = {'SET', 'DEL', 'DELETE', 'EXPIRE', 'LPUSH', 'HSET', 'SADD', 'SREM'}
         
         # Create Context for this connection
         conn_context = ServerContext(
@@ -115,10 +115,13 @@ class IgnisServer:
                     
                     try:
                         cmd_name, args = parse_command(frame)
-                        
+                        # Commands are case-insensitive, as in Redis: a client
+                        # typing `set foo bar` must not get "Unknown command".
+                        cmd_name = cmd_name.upper()
+
                         # Authentication Check
                         if self.password and not authenticated:
-                            if cmd_name.upper() == 'AUTH':
+                            if cmd_name == 'AUTH':
                                 if len(args) == 1 and args[0] == self.password:
                                     authenticated = True
                                     result = "OK"
@@ -251,7 +254,7 @@ class IgnisServer:
                         logger.error(f"Unexpected error: {e}")
                         response = format_response(CommandError("Server error"))
                     
-                    writer.write(response.encode('utf-8'))
+                    writer.write(response)
                 
                 await writer.drain()
                 
