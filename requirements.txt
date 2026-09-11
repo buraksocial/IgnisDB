@@ -1,1 +1,6 @@
+# IgnisDB itself runs on the standard library alone - asyncio, json, socket.
+# Nothing to install to start the server.
+#
+# `websockets` is used only by the example todo app (examples/todo-app), which
+# bridges browser clients to the database.
 websockets

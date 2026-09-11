@@ -24,3 +24,11 @@ env/
 *.err
 test_output.txt
 ignisdb_snapshot.json
+*.rewrite
+*.tmp
+dump.ignis
+
+# Test / tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
