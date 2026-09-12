@@ -58,14 +58,14 @@ IgnisDB has a pretty straightforward and clean design, which is great because it
 
   * **Language**: Python 3.9+
   * **Core Library**: `asyncio`
-  * **Testing**: `pytest` and `pytest-asyncio`
+  * **Testing**: `pytest` (the suite drives `asyncio` directly, so no plugin is needed)
 
 ### ⚙️ Get It Running\!
 
 1.  **Clone the project:**
 
     ```bash
-    git clone [https://github.com/buraksocial/IgnisDB.git](https://github.com/buraksocial/IgnisDB.git)
+    git clone https://github.com/buraksocial/IgnisDB.git
     cd IgnisDB
     ```
 
@@ -89,7 +89,14 @@ IgnisDB has a pretty straightforward and clean design, which is great because it
         python main.py --port 6381
         ```
 
-4.  **Talk to it:**
+4.  **Run the tests:**
+
+    ```bash
+    pip install -r requirements-dev.txt
+    pytest
+    ```
+
+5.  **Talk to it:**
     Open a brand new terminal window and use `telnet` to connect:
 
     ```bash

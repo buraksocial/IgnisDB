@@ -8,6 +8,52 @@ from typing import List, Tuple, Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def iter_restore_commands(data: Dict[str, Any]):
+    """Yields (command, args) pairs that rebuild `data` when replayed.
+
+    Shared by the AOF rewrite and by the initial dataset a master streams to a
+    replica on SYNC, so the two can never drift apart.
+    """
+    now = time.time()
+    for key, value in data.items():
+        if not isinstance(value, tuple) or len(value) != 3:
+            continue
+
+        data_type, content, expire_at = value
+
+        if expire_at and now > expire_at:
+            continue
+
+        if data_type == 'string':
+            val_str = content
+            if isinstance(content, dict):
+                val_str = json.dumps(content, ensure_ascii=False)
+            yield "SET", [key, val_str]
+
+        elif data_type == 'list':
+            # LPUSH with no values is a syntax error on replay.
+            if content:
+                yield "LPUSH", [key] + list(reversed(content))
+
+        elif data_type == 'hash':
+            for field, val in content.items():
+                yield "HSET", [key, field, val]
+
+        elif data_type == 'set':
+            if content:
+                yield "SADD", [key] + list(content)
+
+        else:
+            continue
+
+        if expire_at:
+            # Previously skipped entirely for hashes, so hash TTLs were lost.
+            ttl = int(expire_at - now)
+            if ttl > 0:
+                yield "EXPIRE", [key, ttl]
+
+
 class AofHandler:
     """Manages writing commands to the AOF file for persistence."""
     def __init__(self, path: str, flush_interval: float = 1.0):
@@ -182,60 +228,27 @@ class AofHandler:
     async def rewrite(self, data: Dict[str, Any]):
         """Rewrites the AOF file based on current memory state to reduce file size."""
         temp_path = self._path + ".rewrite"
+        was_running = self._running
         try:
             with open(temp_path, 'w', buffering=1, encoding='utf-8') as f:
-                for key, value in data.items():
-                    if not isinstance(value, tuple) or len(value) != 3:
-                        continue
-                        
-                    data_type, content, expire_at = value
-                    
-                    if expire_at and time.time() > expire_at:
-                        continue
-                        
-                    cmd = None
-                    args = []
-                    
-                    if data_type == 'string':
-                        cmd = "SET"
-                        val_str = content
-                        if isinstance(content, dict):
-                            val_str = json.dumps(content, ensure_ascii=False)
-                        args = [key, val_str]
+                for command, args in iter_restore_commands(data):
+                    self._write_to_file(f, command, *args)
 
-                    elif data_type == 'list':
-                        cmd = "LPUSH"
-                        args = [key] + list(reversed(content))
-                    
-                    elif data_type == 'hash':
-                        for field, val in content.items():
-                            self._write_to_file(f, "HSET", key, field, val)
-                        continue
-
-                    elif data_type == 'set':
-                        cmd = "SADD"
-                        args = [key] + list(content)
-                        
-                    if cmd:
-                        self._write_to_file(f, cmd, *args)
-                        
-                    if expire_at:
-                        ttl = int(expire_at - time.time())
-                        if ttl > 0:
-                            self._write_to_file(f, "EXPIRE", key, ttl)
-
-            was_running = self._running
             self._running = False
-            
+
             if self._file:
-                if self._buffer:
-                    for c in self._buffer: self._file.write(c)
                 self._file.close()
-            
-            if os.path.exists(self._path):
-                os.remove(self._path)
-            os.rename(temp_path, self._path)
-            
+
+            # The rewrite already encodes every buffered command's effect (it
+            # was produced from current memory state). Replaying the buffer
+            # into the compacted file would duplicate LPUSH/SADD members, so
+            # drop it rather than flushing it.
+            self._buffer.clear()
+
+            # Atomic swap: os.remove + os.rename leaves a window with no AOF
+            # at all, and a crash inside it loses the whole dataset.
+            os.replace(temp_path, self._path)
+
             self.open()
             
             logger.info("AOF Rewrite complete. File compacted.")
@@ -264,8 +277,13 @@ class SnapshotHandler:
         self._path = path
 
     def save(self, data: Dict[str, Any]):
-        """Saves data to a JSON snapshot file. Handles bytes via Base64."""
-        
+        """Saves data to a JSON snapshot file. Handles bytes via Base64.
+
+        The file is written to a temporary path and then atomically moved into
+        place, so an interrupted save can never leave a truncated snapshot
+        behind (which would otherwise be silently discarded on next startup).
+        """
+
         def encode_value(val):
             if isinstance(val, bytes):
                 return {"__type__": "bytes", "data": base64.b64encode(val).decode('ascii')}
@@ -283,12 +301,21 @@ class SnapshotHandler:
         for k, v in data.items():
             json_ready[k] = encode_value(v)
 
+        temp_path = f"{self._path}.tmp"
         try:
-            with open(self._path, 'w', encoding='utf-8') as f:
+            with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(json_ready, f)
-            logger.info(f"Database snapshot saved to '{self._path}'.")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self._path)
+            logger.info(f"Database snapshot saved to '{self._path}' ({len(json_ready)} keys).")
         except Exception as e:
             logger.error(f"Error saving snapshot: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def load(self) -> Dict[str, Any]:
         """Loads data from a JSON snapshot file."""
@@ -312,8 +339,13 @@ class SnapshotHandler:
                 if isinstance(v, list) and len(v) == 3:
                     type_, val_, exp_ = v
                     decoded_val = decode_value(val_)
+                    # JSON has no set type, so sets are stored as arrays. Restore
+                    # the original container type, otherwise a reloaded set is a
+                    # list and the next SADD blows up with an AttributeError.
+                    if type_ == 'set' and isinstance(decoded_val, list):
+                        decoded_val = set(decoded_val)
                     decoded_data[k] = (type_, decoded_val, exp_)
-            
+
             logger.info(f"Database loaded from '{self._path}'.")
             return decoded_data
         except FileNotFoundError:
@@ -323,9 +355,21 @@ class SnapshotHandler:
             logger.error(f"Error loading snapshot: {e}")
             return {}
 
-async def periodic_snapshot(storage, interval: int):
-    """Background task to periodically save a snapshot."""
+async def periodic_snapshot(storage, snapshot_handler: 'SnapshotHandler', interval: int):
+    """Background task to periodically save a snapshot.
+
+    The blocking file write is handed to the default executor so a large
+    snapshot does not stall the event loop, and a failed save is logged and
+    retried on the next tick instead of killing the task for good.
+    """
     while True:
         await asyncio.sleep(interval)
-        logger.info("Starting periodic snapshot...")
-        await storage.save_snapshot()
+        try:
+            logger.info("Starting periodic snapshot...")
+            data = await storage.get_all_data()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, snapshot_handler.save, data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic snapshot failed; retrying in %s seconds.", interval)
