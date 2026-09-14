@@ -264,8 +264,13 @@ class SnapshotHandler:
         self._path = path
 
     def save(self, data: Dict[str, Any]):
-        """Saves data to a JSON snapshot file. Handles bytes via Base64."""
-        
+        """Saves data to a JSON snapshot file. Handles bytes via Base64.
+
+        The file is written to a temporary path and then atomically moved into
+        place, so an interrupted save can never leave a truncated snapshot
+        behind (which would otherwise be silently discarded on next startup).
+        """
+
         def encode_value(val):
             if isinstance(val, bytes):
                 return {"__type__": "bytes", "data": base64.b64encode(val).decode('ascii')}
@@ -283,12 +288,21 @@ class SnapshotHandler:
         for k, v in data.items():
             json_ready[k] = encode_value(v)
 
+        temp_path = f"{self._path}.tmp"
         try:
-            with open(self._path, 'w', encoding='utf-8') as f:
+            with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(json_ready, f)
-            logger.info(f"Database snapshot saved to '{self._path}'.")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self._path)
+            logger.info(f"Database snapshot saved to '{self._path}' ({len(json_ready)} keys).")
         except Exception as e:
             logger.error(f"Error saving snapshot: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def load(self) -> Dict[str, Any]:
         """Loads data from a JSON snapshot file."""
@@ -312,8 +326,13 @@ class SnapshotHandler:
                 if isinstance(v, list) and len(v) == 3:
                     type_, val_, exp_ = v
                     decoded_val = decode_value(val_)
+                    # JSON has no set type, so sets are stored as arrays. Restore
+                    # the original container type, otherwise a reloaded set is a
+                    # list and the next SADD blows up with an AttributeError.
+                    if type_ == 'set' and isinstance(decoded_val, list):
+                        decoded_val = set(decoded_val)
                     decoded_data[k] = (type_, decoded_val, exp_)
-            
+
             logger.info(f"Database loaded from '{self._path}'.")
             return decoded_data
         except FileNotFoundError:
@@ -323,9 +342,21 @@ class SnapshotHandler:
             logger.error(f"Error loading snapshot: {e}")
             return {}
 
-async def periodic_snapshot(storage, interval: int):
-    """Background task to periodically save a snapshot."""
+async def periodic_snapshot(storage, snapshot_handler: 'SnapshotHandler', interval: int):
+    """Background task to periodically save a snapshot.
+
+    The blocking file write is handed to the default executor so a large
+    snapshot does not stall the event loop, and a failed save is logged and
+    retried on the next tick instead of killing the task for good.
+    """
     while True:
         await asyncio.sleep(interval)
-        logger.info("Starting periodic snapshot...")
-        await storage.save_snapshot()
+        try:
+            logger.info("Starting periodic snapshot...")
+            data = await storage.get_all_data()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, snapshot_handler.save, data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic snapshot failed; retrying in %s seconds.", interval)
