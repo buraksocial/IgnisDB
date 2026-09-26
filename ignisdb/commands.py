@@ -4,9 +4,21 @@ from .exceptions import CommandError
 
 @CommandRegistry.register('AUTH')
 class AuthCommand(Command):
+    """Validates a password.
+
+    The server short-circuits AUTH while a connection is unauthenticated; this
+    handler covers the remaining cases (already authenticated, or no password
+    configured), which previously answered +OK to any password at all.
+    """
     async def execute(self, context, *args):
         if len(args) != 1:
             raise CommandError("ERR wrong number of arguments for 'auth' command")
+
+        password = getattr(context.server, 'password', None) if context.server else None
+        if not password:
+            raise CommandError("ERR Client sent AUTH, but no password is set")
+        if args[0] != password:
+            raise CommandError("WRONGPASS invalid username-password pair or user is disabled.")
         return "OK"
 
 @CommandRegistry.register('BGREWRITEAOF')
@@ -37,8 +49,10 @@ class SetCommand(Command):
         
         return await context.storage.set(key, value, expire)
 
+@CommandRegistry.register('DEL')
 @CommandRegistry.register('DELETE')
 class DeleteCommand(Command):
+    """DEL is the name every Redis client sends; DELETE is kept as an alias."""
     async def execute(self, context, *args):
         if len(args) != 1: raise ValueError("ERR wrong number of arguments for 'delete' command")
         return await context.storage.delete(args[0])
