@@ -5,9 +5,35 @@ from .exceptions import CommandError, WrongTypeError
 
 logger = logging.getLogger(__name__)
 
+# Error replies start with an uppercase code. If an exception message already
+# carries one we must not prefix another, or clients see "-ERR ERR ...".
+ERROR_CODES = frozenset({
+    "ERR", "WRONGTYPE", "NOAUTH", "WRONGPASS", "NOPERM", "NOSCRIPT",
+    "BUSYGROUP", "EXECABORT", "READONLY", "MOVED", "ASK", "LOADING",
+})
+
+
 class ProtocolHandler:
-    """Parses raw client data into commands and formats responses into RESP."""
-    
+    """Parses raw client data into commands and formats responses into RESP.
+
+    Strings cross the wire as UTF-8. Byte values that are not valid UTF-8 are
+    carried through Python's `surrogateescape` handler, so arbitrary binary
+    payloads survive a SET/GET round trip untouched.
+    """
+
+    ENCODING = 'utf-8'
+    ENCODING_ERRORS = 'surrogateescape'
+
+    def _encode(self, value: str) -> bytes:
+        return value.encode(self.ENCODING, self.ENCODING_ERRORS)
+
+    def _decode(self, value: bytes) -> str:
+        return value.decode(self.ENCODING, self.ENCODING_ERRORS)
+
+    def _bulk(self, payload: bytes) -> bytes:
+        """Builds a RESP bulk string with a length counted in BYTES, not characters."""
+        return b"$%d\r\n%s\r\n" % (len(payload), payload)
+
     def extract_frame(self, buffer: bytes) -> Tuple[Optional[bytes], bytes]:
         """
         Extracts a complete command frame from the buffer.
@@ -83,51 +109,81 @@ class ProtocolHandler:
                     idx += arg_len + 2  # Skip data + \r\n
                     
                 if parts:
-                    # Decode all args to string using latin-1 (lossless for 0-255 byte values)
-                    cmd = parts[0].decode('utf-8')
-                    args = [p.decode('latin-1') for p in parts[1:]]
+                    # One decoding scheme for every path: UTF-8 with
+                    # surrogateescape. Decoding args as latin-1 here while
+                    # responses were encoded as UTF-8 turned every non-ASCII
+                    # value into mojibake on the way back out.
+                    cmd = self._decode(parts[0])
+                    args = [self._decode(p) for p in parts[1:]]
                     return cmd, args
-                    
+
             except Exception:
                 pass  # Fallback to inline
-        
+
         # Inline: space-separated
         parts = command_raw.strip().split()
         if not parts:
             raise CommandError("Empty command")
-        
-        return parts[0].decode('utf-8'), [p.decode('utf-8') for p in parts[1:]]
 
-    def format_response(self, result: Any) -> str:
-        """Formats a Python object into a RESP string for the client."""
+        return self._decode(parts[0]), [self._decode(p) for p in parts[1:]]
+
+    def format_response(self, result: Any) -> bytes:
+        """Formats a Python object into a RESP reply for the client.
+
+        Returns bytes rather than str: bulk-string lengths must count bytes, so
+        the reply cannot be built as text and encoded afterwards without the
+        declared length disagreeing with the payload for any non-ASCII value.
+        """
         if result is None:
-            return "_(nil)\r\n"
+            # RESP null bulk string. The previous "_(nil)" is not a RESP type
+            # at all and desynchronises every standard client.
+            return b"$-1\r\n"
+        elif isinstance(result, bool):
+            # Must precede the int branch: bool is a subclass of int.
+            return b":1\r\n" if result else b":0\r\n"
         elif isinstance(result, str):
             if result == "OK" or result == "QUEUED":
-                return f"+{result}\r\n"
-            return f"${len(result)}\r\n{result}\r\n"
+                return b"+%s\r\n" % self._encode(result)
+            return self._bulk(self._encode(result))
+        elif isinstance(result, (bytes, bytearray)):
+            return self._bulk(bytes(result))
         elif isinstance(result, int):
-            return f":{result}\r\n"
+            return b":%d\r\n" % result
         elif isinstance(result, list):
-            response_parts = [f"*{len(result)}\r\n"]
+            response_parts = [b"*%d\r\n" % len(result)]
             for item in result:
                 response_parts.append(self.format_response(item))
-            return "".join(response_parts)
+            return b"".join(response_parts)
         elif isinstance(result, dict):
             # Serialize dictionary as JSON string
             json_str = json.dumps(result, ensure_ascii=False)
-            return f"${len(json_str)}\r\n{json_str}\r\n"
+            return self._bulk(self._encode(json_str))
         elif isinstance(result, Exception):
-            err_type = "WRONGTYPE" if isinstance(result, WrongTypeError) else "ERR"
-            return f"-{err_type} {str(result)}\r\n"
+            return self.format_error(result)
         else:
             logger.error(f"Cannot format unknown response type: {type(result)}")
-            return f"-ERR Server error: cannot format response\r\n"
+            return b"-ERR Server error: cannot format response\r\n"
+
+    def format_error(self, exc: Exception) -> bytes:
+        """Formats an exception as a RESP error, without doubling the error code."""
+        message = str(exc).strip() or "unknown error"
+        first_word = message.split(" ", 1)[0]
+
+        if isinstance(exc, WrongTypeError) and first_word != "WRONGTYPE":
+            message = f"WRONGTYPE {message}"
+        elif first_word not in ERROR_CODES:
+            message = f"ERR {message}"
+
+        # An error reply is a single line: newlines would break framing.
+        message = message.replace("\r", " ").replace("\n", " ")
+        return b"-%s\r\n" % self._encode(message)
 
     def format_command_as_bytes(self, command: str, *args: Any) -> bytes:
         """Formats a command and arguments into a RESP byte string (for replication)."""
-        parts = [f"*{len(args) + 1}\r\n", f"${len(command)}\r\n{command}\r\n"]
+        parts = [b"*%d\r\n" % (len(args) + 1), self._bulk(self._encode(command))]
         for arg in args:
-            arg_str = str(arg)
-            parts.append(f"${len(arg_str)}\r\n{arg_str}\r\n")
-        return "".join(parts).encode('utf-8')
+            if isinstance(arg, (bytes, bytearray)):
+                parts.append(self._bulk(bytes(arg)))
+            else:
+                parts.append(self._bulk(self._encode(str(arg))))
+        return b"".join(parts)
