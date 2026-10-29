@@ -41,7 +41,8 @@ class StorageEngine:
         return "OK"
 
     async def delete(self, key: str) -> int:
-        if self._check_and_delete_expired(key): return 1
+        # An already-expired key is logically absent, so nothing was removed.
+        if self._check_and_delete_expired(key): return 0
         if key in self._data:
             del self._data[key]
             return 1
@@ -144,13 +145,33 @@ class StorageEngine:
         return list(current_set)
     
     # --- For Persistence ---
-    async def get_all_data(self):
-        """Returns a copy of internal data for snapshotting."""
-        # Prune expired keys first - creating list to avoid runtime error during iteration
+    def snapshot(self) -> Dict[str, Tuple[str, Any, Optional[float]]]:
+        """Prunes expired keys and returns a copy of the data safe to persist.
+
+        The containers themselves are copied, not just the outer dict: the
+        snapshot is serialised in a worker thread, and a shallow copy would let
+        a concurrent LPUSH/HSET/SADD mutate a list, dict or set while json.dump
+        is walking it.
+        """
+        # Creating list to avoid runtime error during iteration
         keys = list(self._data.keys())
         for key in keys:
             self._check_and_delete_expired(key)
-        return self._data.copy()
+
+        copied: Dict[str, Tuple[str, Any, Optional[float]]] = {}
+        for key, (type_, value, expiration_time) in self._data.items():
+            if isinstance(value, list):
+                value = list(value)
+            elif isinstance(value, dict):
+                value = dict(value)
+            elif isinstance(value, set):
+                value = set(value)
+            copied[key] = (type_, value, expiration_time)
+        return copied
+
+    async def get_all_data(self):
+        """Returns a copy of internal data for snapshotting."""
+        return self.snapshot()
 
     async def load_data(self, data):
         """Replaces internal data structure."""
