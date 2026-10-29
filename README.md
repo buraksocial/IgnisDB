@@ -92,11 +92,15 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+Run the RESP server with `python main.py` (defaults to `127.0.0.1:6380` and
+stores database files in `./data`). Use `--host`, `--port`, or `--data-dir` to
+override these settings.
+
 ### Embedded Mode (Recommended)
 
 ```python
 import asyncio
-from ignisdb_v2 import DB
+from ignisdb import DB
 
 async def main():
     async with await DB.open('/var/lib/ignisdb') as db:
@@ -128,7 +132,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from ignisdb_v2 import DB, Server
+from ignisdb import DB, Server
 
 async def main():
     db = await DB.open('/var/lib/ignisdb')
@@ -229,7 +233,7 @@ async def main():
 ```python
 # ✅ v2: Embedded (no network, direct function calls)
 import asyncio
-from ignisdb_v2 import DB
+from ignisdb import DB
 
 async def main():
     async with await DB.open('/var/lib/ignisdb') as db:
@@ -242,7 +246,7 @@ If you prefer the client-server model, v2's server is fully backward compatible:
 
 ```python
 # v2 server — same port, same protocol, same commands
-from ignisdb_v2 import DB, Server
+from ignisdb import DB, Server
 
 db = await DB.open('/var/lib/ignisdb')
 server = Server(db.engine, host='localhost', port=6380)
@@ -280,13 +284,7 @@ For embedded mode users migrating from direct `StorageEngine` access:
 
 ```
 IgnisDB/
-├── ignisdb/                  # v1 source (preserved on v1 branch)
-│   ├── storage.py            # In-memory storage engine
-│   ├── protocol.py           # RESP parser
-│   ├── server.py             # TCP server
-│   ├── persistence.py        # AOF + Snapshot
-│   └── ...
-├── ignisdb_v2/               # v2 source
+├── ignisdb/                  # v2 package
 │   ├── __init__.py           # Package exports
 │   ├── engine.py             # LSMEngine + DB API
 │   ├── memtable.py           # SkipList implementation
@@ -310,7 +308,8 @@ IgnisDB/
 ├── examples/
 │   └── basic_usage.py        # Usage examples
 ├── README.md
-├── requirements.txt
+├── main.py                   # RESP server entry point
+├── requirements.txt          # No runtime dependencies
 └── LICENSE
 ```
 

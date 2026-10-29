@@ -1,6 +1,6 @@
 """Tests for BloomFilter"""
 import pytest
-from ignisdb_v2.bloom import BloomFilter
+from ignisdb.bloom import BloomFilter
 
 
 class TestBloomFilter:

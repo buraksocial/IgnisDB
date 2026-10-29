@@ -1,6 +1,6 @@
 """Tests for TieredCache"""
 import pytest
-from ignisdb_v2.cache import TieredCache
+from ignisdb.cache import TieredCache
 
 
 class TestTieredCache:

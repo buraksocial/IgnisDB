@@ -18,7 +18,7 @@ import tempfile
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ignisdb_v2 import DB
+from ignisdb import DB
 
 
 async def benchmark_write(db: DB, n: int = 100_000, value_size: int = 100):

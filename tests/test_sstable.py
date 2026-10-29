@@ -2,8 +2,8 @@
 import pytest
 import tempfile
 import os
-from ignisdb_v2.memtable import SkipList
-from ignisdb_v2.sstable import SSTable
+from ignisdb.memtable import SkipList
+from ignisdb.sstable import SSTable
 
 
 @pytest.fixture

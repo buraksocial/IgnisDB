@@ -1,6 +1,6 @@
 """Tests for InvertedIndex full-text search"""
 import pytest
-from ignisdb_v2.search import InvertedIndex
+from ignisdb.search import InvertedIndex
 
 
 class TestInvertedIndex:

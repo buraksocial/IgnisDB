@@ -1,6 +1,6 @@
 """Tests for SkipList MemTable"""
 import pytest
-from ignisdb_v2.memtable import SkipList
+from ignisdb.memtable import SkipList
 
 
 class TestSkipList:

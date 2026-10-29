@@ -1,6 +1,6 @@
 """Tests for SortedSet"""
 import pytest
-from ignisdb_v2.sorted_set import SortedSet
+from ignisdb.sorted_set import SortedSet
 
 
 class TestSortedSet:

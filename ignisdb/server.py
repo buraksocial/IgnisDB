@@ -1,349 +1,596 @@
+"""
+RESP Protocol Server - Backward compatible with IgnisDB v1 clients
+
+Wraps LSMEngine with TCP server supporting RESP protocol.
+All v1 commands work unchanged; new v2 commands added.
+"""
+
 import asyncio
 import logging
-import argparse
-from typing import Optional
-from .storage import StorageEngine
-from .protocol import ProtocolHandler
-from .mysql_protocol import MySQLProtocolHandler
-from .persistence import AofHandler, SnapshotHandler, periodic_snapshot
-from .commands import CommandRegistry
-from .commands_interface import ServerContext
-from .exceptions import CommandError, WrongTypeError
-from .pubsub import PubSubManager
-from .security import SecurityManager
+import time
+from typing import Optional, Dict, Any, List
+
+from .engine import LSMEngine
 
 logger = logging.getLogger(__name__)
 
-class IgnisServer:
-    def __init__(self, host: str, port: int, persistence_mode: str, 
-                 snapshot_path: str, aof_path: str, snapshot_interval: int, 
-                 password: Optional[str] = None, encryption_key: Optional[str] = None):
+
+class Server:
+    """
+    TCP server with RESP protocol support.
+
+    Backward compatible with IgnisDB v1 clients.
+    Supports both inline and RESP array command formats.
+    """
+
+    def __init__(self, engine: LSMEngine, host: str = 'localhost', port: int = 6380):
+        self.engine = engine
         self.host = host
         self.port = port
-        self.persistence_mode = persistence_mode
-        self.snapshot_path = snapshot_path
-        self.aof_path = aof_path
-        self.snapshot_interval = snapshot_interval
-        self.password = password
-        
-        # Components
-        self.aof_handler = AofHandler(aof_path) if persistence_mode == 'aof' else None
-        self.snapshot_handler = SnapshotHandler(snapshot_path)
-        self.storage = StorageEngine()
-        self.protocol = ProtocolHandler() 
-        self.pubsub = PubSubManager()
-        self.security = SecurityManager(encryption_key)
-        self.replicas = set() # Set of writers (replicas)
+        self._server = None
+        self._running = False
 
-        # Pre-instantiate commands for performance (Singleton-like usage)
-        self.command_handlers = {}
-        for cmd_name in CommandRegistry._commands:
-            self.command_handlers[cmd_name] = CommandRegistry.get_command(cmd_name)()
+        # In-memory data structures for backward compatibility
+        # These wrap the LSM engine for complex types
+        self._lists: Dict[bytes, List[bytes]] = {}
+        self._hashes: Dict[bytes, Dict[bytes, bytes]] = {}
+        self._sets: Dict[bytes, set] = {}
+        self._ttls: Dict[bytes, float] = {}  # key -> expiry timestamp
 
-    async def initialize(self):
-        """Initializes persistence and loads data."""
-        if self.aof_handler:
-            self.aof_handler.open()
-            
-        if self.persistence_mode == 'snapshot':
-            data = self.snapshot_handler.load()
-            await self.storage.load_data(data)
-            if self.snapshot_interval > 0:
-                asyncio.create_task(periodic_snapshot(self.storage, self.snapshot_interval))
-        elif self.persistence_mode == 'aof':
-            logging.info("Replaying AOF...")
-            commands = self.aof_handler.load()
-            count = 0
-            
-            # Context for replay (no network writer)
-            replay_context = ServerContext(storage=self.storage, pubsub=self.pubsub, server=self)
-            
-            for i, (cmd_name, args) in enumerate(commands):
-                # FIX: Force uppercase lookup because keys in command_handlers are UPPERCASE
-                handler = self.command_handlers.get(cmd_name.upper())
-                
-                if handler:
-                    try:
-                        await handler.execute(replay_context, *args)
-                        count += 1
-                    except Exception as e:
-                        logger.error(f"Error replaying AOF command {cmd_name}: {e}")
-            logging.info(f"Replayed {count} commands from AOF.")
-
-    async def handle_client(self, reader, writer):
-        addr = writer.get_extra_info('peername')
-        logger.info(f"New connection from {addr}")
-        
-        # Connection State
-        authenticated = False if self.password else True
-        
-        # Localize lookups for hot loop
-        parse_command = self.protocol.parse_command
-        format_response = self.protocol.format_response
-        command_handlers = self.command_handlers
-        storage = self.storage
-        aof = self.aof_handler
-        write_cmds = {'SET', 'DELETE', 'EXPIRE', 'LPUSH', 'HSET', 'SADD', 'SREM'}
-        
-        # Create Context for this connection
-        conn_context = ServerContext(
-            storage=storage, 
-            pubsub=self.pubsub, 
-            writer=writer, 
-            aof=aof, 
-            server=self,
-            security=self.security
+    async def serve(self):
+        """Start the server."""
+        self._running = True
+        self._server = await asyncio.start_server(
+            self._handle_client, self.host, self.port
         )
-        
-        try:
-            buffer = b""
-            while True:
-                data = await reader.read(65536) # Read up to 64KB
-                if not data: break
-                
-                buffer += data
-                
-                while True:
-                    frame, buffer = self.protocol.extract_frame(buffer)
-                    if frame is None: break
-                    
-                    try:
-                        cmd_name, args = parse_command(frame)
-                        
-                        # Authentication Check
-                        if self.password and not authenticated:
-                            if cmd_name.upper() == 'AUTH':
-                                if len(args) == 1 and args[0] == self.password:
-                                    authenticated = True
-                                    result = "OK"
-                                else:
-                                    raise CommandError("WRONGPASS invalid username-password pair or user is disabled.")
-                            else:
-                                raise CommandError("NOAUTH Authentication required.")
-                        
-                        else:
-                            # Normal command execution
-                            handler = command_handlers.get(cmd_name)
-                            
-                            if not handler:
-                                raise CommandError(f"Unknown command '{cmd_name}'")
-                            
-                            result = await handler.execute(conn_context, *args)
-                            
-                            # Persist write commands
-                            if cmd_name in write_cmds:
-                                if aof:
-                                    aof.write(cmd_name, *args)
-                                
-                                # Replication Propagate
-                                if self.replicas:
-                                    try:
-                                        # Use Inline format because ProtocolHandler only supports Inline parsing currently.
-                                        # format: CMD arg1 arg2\r\n
-                                        # Note: This is not binary safe for args with spaces, but consistent with current parser.
-                                        
-                                        # Convert args to string
-                                        str_args = [str(arg) for arg in args]
-                                        inline_cmd = f"{cmd_name} {' '.join(str_args)}\\r\\n".encode('utf-8')
-                                        
-                                        for replica in list(self.replicas):
-                                            try:
-                                                replica.write(inline_cmd)
-                                            except Exception as e:
-                                                logger.error(f"Error persisting to replica: {e}")
-                                                self.replicas.discard(replica)
-                                    except Exception as e:
-                                        logger.error(f"Error constructing replication payload: {e}")
-                            
-                            # Special Admin Commands
-                            if cmd_name.upper() == 'SYNC':
-                                # Client wants to be a replica
-                                self.replicas.add(writer)
-                                logger.info(f"Client {addr} registered as REPLICA")
-                                # Ideally we send a snapshot here.
-                                # For MVP, we just start forwarding new writes.
-                                # But we should send standard "OK" or "+FULLRESYNC"
-                                # Redis sends RDB. We'll send OK to keep connection alive.
-                                # IMPORTANT: Replica usually does NOT expect standard response to SYNC, 
-                                # it expects RDB stream.
-                                # Let's send a simple OK so replica knows we accepted.
-                                pass # We don't return 'result' here if we want to stream?
-                                # Actually, let's just return OK and let logic flow.
-                                result = "OK"
+        logger.info(f"IgnisDB v2 server running on {self.host}:{self.port}")
 
-                            elif cmd_name.upper() == 'REPLICAOF':
-                                if len(args) != 2:
-                                     raise CommandError("ERR wrong number of arguments for 'replicaof'")
-                                host, port = args[0], args[1]
-                                if host.upper() == "NO" and port.upper() == "ONE":
-                                    # Turn off replication
-                                    # TODO: implement stop replication
-                                    result = "OK"
-                                else:
-                                    # Start replication task
-                                    # connecting to master
-                                    asyncio.create_task(self.connect_to_master(host, int(port)))
-                                    result = "OK"
+        async with self._server:
+            await self._server.serve_forever()
 
-                            elif cmd_name.upper() == 'EXPORT':
-                                # Export data to .ignis file
-                                filename = "dump.ignis"
-                                if len(args) > 0:
-                                    filename = args[0]
-                                    if not filename.endswith('.ignis'):
-                                        filename += ".ignis"
-                                
-                                logger.info(f"Exporting data to {filename}...")
-                                data_snapshot = await storage.get_all_data()
-                                # Reuse SnapshotHandler logic for JSON dumping
-                                exporter = SnapshotHandler(filename)
-                                exporter.save(data_snapshot)
-                                result = f"Data exported to {filename}"
+    async def stop(self):
+        """Stop the server."""
+        self._running = False
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+        await self.engine.close()
 
-                            elif cmd_name.upper() == 'IMPORT':
-                                # Import data from .ignis file
-                                filename = "dump.ignis"
-                                if len(args) > 0:
-                                    filename = args[0]
-                                    if not filename.endswith('.ignis'):
-                                        filename += ".ignis"
-                                
-                                import os
-                                if not os.path.exists(filename):
-                                    raise CommandError(f"ERR Import file '{filename}' not found")
-                                
-                                logger.info(f"Importing data from {filename}...")
-                                importer = SnapshotHandler(filename)
-                                loaded_data = importer.load()
-                                
-                                count = await storage.restore_data(loaded_data)
-                                
-                                # AOF Persistence for Imported Data
-                                if aof:
-                                    # Optimized: Instead of appending millions of commands to the AOF buffer (RAM spike),
-                                    # we trigger a background rewrite which streams current DB state to disk efficiently.
-                                    logger.info("Triggering background AOF rewrite to persist imported data...")
-                                    asyncio.create_task(aof.rewrite(await storage.get_all_data()))
-                                
-                                result = f"Imported {count} keys from {filename}"
-
-                            elif cmd_name.upper() == 'BGREWRITEAOF':
-                                if aof:
-                                    data_snapshot = await storage.get_all_data()
-                                    logger.info("Starting AOF rewrite...")
-                                    await aof.rewrite(data_snapshot)
-                                    result = "Background append only file rewriting started" 
-                                else:
-                                    raise CommandError("AOF persistence is not enabled")
-
-                            
-                        response = format_response(result)
-                        
-                    except (CommandError, WrongTypeError, ValueError) as e:
-                        response = format_response(e)
-                    except Exception as e:
-                        logger.error(f"Unexpected error: {e}")
-                        response = format_response(CommandError("Server error"))
-                    
-                    writer.write(response.encode('utf-8'))
-                
-                await writer.drain()
-                
-        except ConnectionResetError:
-            logger.warning(f"Connection reset by {addr}")
-        finally:
-            self.pubsub.remove_client(writer)
-            writer.close()
-            await writer.wait_closed()
-            logger.info(f"Connection closed for {addr}")
-
-    async def connect_to_master(self, host: str, port: int):
-        """Connects to a master instance and initiates replication."""
-        try:
-            logger.info(f"Connecting to MASTER {host}:{port}...")
-            reader, writer = await asyncio.open_connection(host, port)
-            
-            # 1. PING (optional, but good)
-            # 2. AUTH (if needed)
-            # 3. SYNC
-            writer.write(b"SYNC\\r\\n")
-            await writer.drain()
-            
-            logger.info("Sent SYNC to master. Waiting for stream...")
-            
-            # Loop to read commands from Master and execute them locally
-            while True:
-                data = await reader.read(65536)
-                if not data: break
-                
-                # We need to process these commands as if they were local writes
-                # But without writing to AOF? Or YES writing to AOF?
-                # Usually Replicas DO write to their own AOF.
-                # We can reuse handle_client logic but we don't have a 'writer' for response?
-                # Master doesn't expect responses to propagated commands.
-                # So we need a special 'execute_command' function that doesn't reply.
-                
-                # Quick hack: Parse and execute directly
-                buffer = data
-                while b'\\n' in buffer:
-                    line, buffer = buffer.split(b'\\n', 1)
-                    line = line.strip()
-                    if not line: continue
-                     
-                    # If line starts with *, it's RESP array.
-                    # Our current parser might be simple.
-                    # As defined in replica propagation above, we send RESP.
-                    # If our ProtocolHandler parses RESP, use it.
-                    # For now, let's assume we can parse it.
-                    # NOTE: This simple parser in handle_client splits by \\n.
-                    # RESP arrays have newlines.
-                    # This indicates we need a proper RESP parser for replication to work 100%.
-                    # But for now, let's try to reuse what we have.
-                    
-                    try:
-                        cmd_name, args = self.protocol.parse_command(line)
-                        if cmd_name:
-                             handler = self.command_handlers.get(cmd_name)
-                             if handler:
-                                 # Create a dummy context
-                                 # We pass 'writer=None' so commands don't fail if they don't need it.
-                                 # PubSub commands need it, but we unlikely replicate subscribe.
-                                 ctx = ServerContext(storage=self.storage, pubsub=self.pubsub, server=self, aof=self.aof_handler)
-                                 await handler.execute(ctx, *args)
-                                 # We also write to our AOF if enabled
-                                 if self.aof_handler and cmd_name in {'SET', 'DELETE', 'SADD', 'SREM'}:
-                                     self.aof_handler.write(cmd_name, *args)
-                    except Exception as e:
-                        logger.error(f"Replica execution error: {e}")
-
-        except Exception as e:
-            logger.error(f"Failed to connect/sync with MASTER: {e}")
-
-    async def handle_mysql_client(self, reader, writer):
+    async def _handle_client(self, reader: asyncio.StreamReader,
+                              writer: asyncio.StreamWriter):
+        """Handle a single client connection."""
         addr = writer.get_extra_info('peername')
-        logger.info(f"New MySQL connection from {addr}")
-        handler = MySQLProtocolHandler(reader, writer, self.storage)
-        await handler.handle_connection()
+        logger.debug(f"New connection from {addr}")
 
-    async def start(self):
-        await self.initialize()
-        
-        # Start Redis-like Server
-        server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        logger.info(f"IgnisDB (Redis) server running on {self.host}:{self.port}")
-        
-        # Start MySQL-like Server (Port 3307 for now to avoid conflict)
-        mysql_port = 3307
+        buffer = b""
         try:
-            mysql_server = await asyncio.start_server(self.handle_mysql_client, self.host, mysql_port)
-            logger.info(f"IgnisDB (MySQL Compatibility) server running on {self.host}:{mysql_port}")
-            asyncio.create_task(mysql_server.serve_forever())
-        except Exception as e:
-            logger.error(f"Failed to start MySQL listener: {e}")
-        
-        async with server:
-            await server.serve_forever()
+            while self._running:
+                data = await reader.read(65536)
+                if not data:
+                    break
 
-    def shutdown(self):
-        if self.aof_handler:
-            self.aof_handler.close()
+                buffer += data
+
+                while True:
+                    frame, buffer = self._extract_frame(buffer)
+                    if frame is None:
+                        break
+
+                    try:
+                        cmd, args = self._parse_command(frame)
+                        result = await self._execute_command(cmd, args)
+                        response = self._format_response(result)
+                        writer.write(response.encode('utf-8'))
+                    except Exception as e:
+                        error_resp = f"-ERR {str(e)}\r\n"
+                        writer.write(error_resp.encode('utf-8'))
+
+                await writer.drain()
+
+        except ConnectionResetError:
+            pass
+        except Exception as e:
+            logger.error(f"Client handler error: {e}")
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            logger.debug(f"Connection closed for {addr}")
+
+    def _extract_frame(self, buffer: bytes):
+        """Extract a complete RESP frame or inline command."""
+        if not buffer:
+            return None, buffer
+
+        # RESP Array
+        if buffer.startswith(b'*'):
+            try:
+                eol = buffer.find(b'\r\n')
+                if eol == -1:
+                    return None, buffer
+
+                num_args = int(buffer[1:eol])
+                pos = eol + 2
+
+                for _ in range(num_args):
+                    len_eol = buffer.find(b'\r\n', pos)
+                    if len_eol == -1:
+                        return None, buffer
+
+                    line = buffer[pos:len_eol]
+                    if not line.startswith(b'$'):
+                        return None, buffer
+
+                    arg_len = int(line[1:])
+                    pos = len_eol + 2 + arg_len + 2
+
+                    if pos > len(buffer):
+                        return None, buffer
+
+                return buffer[:pos], buffer[pos:]
+            except (ValueError, IndexError):
+                pass
+
+        # Inline command
+        eol = buffer.find(b'\n')
+        if eol != -1:
+            return buffer[:eol+1], buffer[eol+1:]
+
+        return None, buffer
+
+    def _parse_command(self, raw: bytes):
+        """Parse RESP or inline command into (cmd, args)."""
+        if raw.startswith(b'*'):
+            try:
+                idx = 0
+
+                def read_line(start):
+                    end = raw.find(b'\r\n', start)
+                    if end == -1:
+                        return None, start
+                    return raw[start:end], end + 2
+
+                line, idx = read_line(idx)
+                num_args = int(line[1:])
+
+                parts = []
+                for _ in range(num_args):
+                    line, idx = read_line(idx)
+                    if not line or not line.startswith(b'$'):
+                        raise ValueError("Invalid RESP")
+
+                    arg_len = int(line[1:])
+                    arg_data = raw[idx:idx + arg_len]
+                    parts.append(arg_data)
+                    idx += arg_len + 2
+
+                if parts:
+                    cmd = parts[0].decode('utf-8').upper()
+                    args = [p.decode('latin-1') for p in parts[1:]]
+                    return cmd, args
+            except Exception:
+                pass
+
+        # Inline fallback
+        parts = raw.strip().split()
+        if not parts:
+            raise ValueError("Empty command")
+
+        cmd = parts[0].decode('utf-8').upper()
+        args = [p.decode('utf-8') for p in parts[1:]]
+        return cmd, args
+
+    def _format_response(self, result: Any) -> str:
+        """Format Python object as RESP response."""
+        if result is None:
+            return "$-1\r\n"
+        elif isinstance(result, str):
+            if result in ("OK", "QUEUED", "PONG"):
+                return f"+{result}\r\n"
+            return f"${len(result)}\r\n{result}\r\n"
+        elif isinstance(result, bytes):
+            decoded = result.decode('latin-1')
+            return f"${len(decoded)}\r\n{decoded}\r\n"
+        elif isinstance(result, int):
+            return f":{result}\r\n"
+        elif isinstance(result, float):
+            return f"${len(str(result))}\r\n{result}\r\n"
+        elif isinstance(result, list):
+            parts = [f"*{len(result)}\r\n"]
+            for item in result:
+                parts.append(self._format_response(item))
+            return "".join(parts)
+        elif isinstance(result, Exception):
+            return f"-ERR {str(result)}\r\n"
+        else:
+            s = str(result)
+            return f"${len(s)}\r\n{s}\r\n"
+
+    async def _execute_command(self, cmd: str, args: List[str]) -> Any:
+        """Execute a command and return result."""
+
+        # === String Commands ===
+        if cmd == 'GET':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'get'")
+            key = args[0].encode('utf-8')
+            # Check TTL
+            if key in self._ttls and time.time() > self._ttls[key]:
+                await self.engine.delete(key)
+                del self._ttls[key]
+                return None
+            return await self.engine.get(key)
+
+        elif cmd == 'SET':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'set'")
+            key = args[0].encode('utf-8')
+            value = args[1].encode('utf-8')
+            await self.engine.put(key, value)
+
+            # Handle EX/PX options
+            i = 2
+            while i < len(args):
+                opt = args[i].upper()
+                if opt == 'EX' and i + 1 < len(args):
+                    ttl = int(args[i + 1])
+                    self._ttls[key] = time.time() + ttl
+                    i += 2
+                elif opt == 'PX' and i + 1 < len(args):
+                    ttl_ms = int(args[i + 1])
+                    self._ttls[key] = time.time() + ttl_ms / 1000
+                    i += 2
+                else:
+                    i += 1
+            return "OK"
+
+        elif cmd == 'DEL' or cmd == 'DELETE':
+            if len(args) < 1:
+                raise ValueError("wrong number of arguments for 'del'")
+            count = 0
+            for arg in args:
+                key = arg.encode('utf-8')
+                if await self.engine.delete(key):
+                    count += 1
+                self._ttls.pop(key, None)
+            return count
+
+        elif cmd == 'EXISTS':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'exists'")
+            key = args[0].encode('utf-8')
+            val = await self.engine.get(key)
+            return 1 if val is not None else 0
+
+        elif cmd == 'EXPIRE':
+            if len(args) != 2:
+                raise ValueError("wrong number of arguments for 'expire'")
+            key = args[0].encode('utf-8')
+            seconds = int(args[1])
+            val = await self.engine.get(key)
+            if val is not None:
+                self._ttls[key] = time.time() + seconds
+                return 1
+            return 0
+
+        elif cmd == 'TTL':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'ttl'")
+            key = args[0].encode('utf-8')
+            if key not in self._ttls:
+                val = await self.engine.get(key)
+                return -1 if val is not None else -2
+            remaining = self._ttls[key] - time.time()
+            if remaining <= 0:
+                await self.engine.delete(key)
+                del self._ttls[key]
+                return -2
+            return int(remaining)
+
+        elif cmd == 'PERSIST':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'persist'")
+            key = args[0].encode('utf-8')
+            if key in self._ttls:
+                del self._ttls[key]
+                return 1
+            return 0
+
+        # === List Commands ===
+        elif cmd == 'LPUSH':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'lpush'")
+            key = args[0].encode('utf-8')
+            if key not in self._lists:
+                self._lists[key] = []
+            for val in args[1:]:
+                self._lists[key].insert(0, val.encode('utf-8'))
+            return len(self._lists[key])
+
+        elif cmd == 'RPUSH':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'rpush'")
+            key = args[0].encode('utf-8')
+            if key not in self._lists:
+                self._lists[key] = []
+            for val in args[1:]:
+                self._lists[key].append(val.encode('utf-8'))
+            return len(self._lists[key])
+
+        elif cmd == 'LRANGE':
+            if len(args) != 3:
+                raise ValueError("wrong number of arguments for 'lrange'")
+            key = args[0].encode('utf-8')
+            start = int(args[1])
+            stop = int(args[2])
+            lst = self._lists.get(key, [])
+            if stop == -1:
+                return lst[start:]
+            return lst[start:stop + 1]
+
+        elif cmd == 'LLEN':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'llen'")
+            key = args[0].encode('utf-8')
+            return len(self._lists.get(key, []))
+
+        # === Hash Commands ===
+        elif cmd == 'HSET':
+            if len(args) != 3:
+                raise ValueError("wrong number of arguments for 'hset'")
+            key = args[0].encode('utf-8')
+            field = args[1].encode('utf-8')
+            value = args[2].encode('utf-8')
+            if key not in self._hashes:
+                self._hashes[key] = {}
+            is_new = 1 if field not in self._hashes[key] else 0
+            self._hashes[key][field] = value
+            return is_new
+
+        elif cmd == 'HGET':
+            if len(args) != 2:
+                raise ValueError("wrong number of arguments for 'hget'")
+            key = args[0].encode('utf-8')
+            field = args[1].encode('utf-8')
+            h = self._hashes.get(key, {})
+            return h.get(field)
+
+        elif cmd == 'HGETALL':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'hgetall'")
+            key = args[0].encode('utf-8')
+            h = self._hashes.get(key, {})
+            result = []
+            for f, v in h.items():
+                result.extend([f, v])
+            return result
+
+        elif cmd == 'HDEL':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'hdel'")
+            key = args[0].encode('utf-8')
+            h = self._hashes.get(key, {})
+            count = 0
+            for field in args[1:]:
+                f = field.encode('utf-8')
+                if f in h:
+                    del h[f]
+                    count += 1
+            return count
+
+        # === Set Commands ===
+        elif cmd == 'SADD':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'sadd'")
+            key = args[0].encode('utf-8')
+            if key not in self._sets:
+                self._sets[key] = set()
+            count = 0
+            for member in args[1:]:
+                m = member.encode('utf-8')
+                if m not in self._sets[key]:
+                    self._sets[key].add(m)
+                    count += 1
+            return count
+
+        elif cmd == 'SMEMBERS':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'smembers'")
+            key = args[0].encode('utf-8')
+            return list(self._sets.get(key, set()))
+
+        elif cmd == 'SISMEMBER':
+            if len(args) != 2:
+                raise ValueError("wrong number of arguments for 'sismember'")
+            key = args[0].encode('utf-8')
+            member = args[1].encode('utf-8')
+            return 1 if member in self._sets.get(key, set()) else 0
+
+        elif cmd == 'SREM':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'srem'")
+            key = args[0].encode('utf-8')
+            s = self._sets.get(key, set())
+            count = 0
+            for member in args[1:]:
+                m = member.encode('utf-8')
+                if m in s:
+                    s.remove(m)
+                    count += 1
+            return count
+
+        # === Sorted Set Commands (v2) ===
+        elif cmd == 'ZADD':
+            if len(args) < 3 or len(args) % 2 == 0:
+                raise ValueError("wrong number of arguments for 'zadd'")
+            key = args[0].encode('utf-8')
+            count = 0
+            i = 1
+            while i < len(args):
+                score = float(args[i])
+                member = args[i + 1].encode('utf-8')
+                count += self.engine.zadd(key, score, member)
+                i += 2
+            return count
+
+        elif cmd == 'ZRANGE':
+            if len(args) < 3:
+                raise ValueError("wrong number of arguments for 'zrange'")
+            key = args[0].encode('utf-8')
+            start = int(args[1])
+            stop = int(args[2])
+            return self.engine.zrange(key, start, stop)
+
+        elif cmd == 'ZREVRANGE':
+            if len(args) < 3:
+                raise ValueError("wrong number of arguments for 'zrevrange'")
+            key = args[0].encode('utf-8')
+            start = int(args[1])
+            stop = int(args[2])
+            return self.engine.zrevrange(key, start, stop)
+
+        elif cmd == 'ZRANGEBYSCORE':
+            if len(args) < 3:
+                raise ValueError("wrong number of arguments for 'zrangebyscore'")
+            key = args[0].encode('utf-8')
+            min_score = float('-inf') if args[1] == '-inf' else float(args[1])
+            max_score = float('inf') if args[2] == '+inf' or args[2] == 'inf' else float(args[2])
+            offset, limit = 0, -1
+            i = 3
+            while i < len(args):
+                if args[i].upper() == 'LIMIT' and i + 2 < len(args):
+                    offset = int(args[i + 1])
+                    limit = int(args[i + 2])
+                    i += 3
+                else:
+                    i += 1
+            return self.engine.zrangebyscore(key, min_score, max_score, offset, limit)
+
+        elif cmd == 'ZREVRANGEBYSCORE':
+            if len(args) < 3:
+                raise ValueError("wrong number of arguments for 'zrevrangebyscore'")
+            key = args[0].encode('utf-8')
+            max_score = float('inf') if args[1] == '+inf' or args[1] == 'inf' else float(args[1])
+            min_score = float('-inf') if args[2] == '-inf' else float(args[2])
+            offset, limit = 0, -1
+            i = 3
+            while i < len(args):
+                if args[i].upper() == 'LIMIT' and i + 2 < len(args):
+                    offset = int(args[i + 1])
+                    limit = int(args[i + 2])
+                    i += 3
+                else:
+                    i += 1
+            return self.engine.zrevrangebyscore(key, max_score, min_score, offset, limit)
+
+        elif cmd == 'ZSCORE':
+            if len(args) != 2:
+                raise ValueError("wrong number of arguments for 'zscore'")
+            key = args[0].encode('utf-8')
+            member = args[1].encode('utf-8')
+            score = self.engine.zscore(key, member)
+            return str(score) if score is not None else None
+
+        elif cmd == 'ZREM':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'zrem'")
+            key = args[0].encode('utf-8')
+            count = 0
+            for member in args[1:]:
+                count += self.engine.zrem(key, member.encode('utf-8'))
+            return count
+
+        elif cmd == 'ZCARD':
+            if len(args) != 1:
+                raise ValueError("wrong number of arguments for 'zcard'")
+            key = args[0].encode('utf-8')
+            return self.engine.zcard(key)
+
+        # === Full-Text Search Commands (v2) ===
+        elif cmd == 'FT.ADD':
+            if len(args) < 2:
+                raise ValueError("wrong number of arguments for 'ft.add'")
+            doc_id = args[0]
+            text = ' '.join(args[1:])
+            self.engine.ft_add(doc_id, text)
+            return "OK"
+
+        elif cmd == 'FT.SEARCH':
+            if len(args) < 1:
+                raise ValueError("wrong number of arguments for 'ft.search'")
+            query = args[0]
+            limit = 20
+            i = 1
+            while i < len(args):
+                if args[i].upper() == 'LIMIT' and i + 1 < len(args):
+                    limit = int(args[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            results = self.engine.ft_search(query, limit)
+            # Format as [doc_id, score, doc_id, score, ...]
+            flat = []
+            for doc_id, score in results:
+                flat.extend([doc_id.encode('utf-8'), str(score).encode('utf-8')])
+            return flat
+
+        # === Cache Stats (v2) ===
+        elif cmd == 'CACHE.STATS':
+            stats = self.engine.get_stats()
+            lines = []
+            for k, v in stats.items():
+                if isinstance(v, dict):
+                    for sk, sv in v.items():
+                        lines.append(f"{k}.{sk}: {sv}")
+                else:
+                    lines.append(f"{k}: {v}")
+            return '\n'.join(lines)
+
+        # === Utility Commands ===
+        elif cmd == 'PING':
+            return "PONG" if not args else args[0]
+
+        elif cmd == 'INFO':
+            stats = self.engine.get_stats()
+            lines = [
+                "# Server",
+                f"ignisdb_version:2.0.0",
+                f"uptime_in_seconds:{int(time.time())}",
+                "",
+                "# Storage",
+                f"memtable_entries:{stats['memtable_entries']}",
+                f"sstable_count:{stats['sstable_count']}",
+                f"total_writes:{stats['writes']}",
+                f"total_reads:{stats['reads']}",
+                "",
+                "# Cache",
+                f"cache_hits:{stats['cache']['hits']}",
+                f"cache_misses:{stats['cache']['misses']}",
+                f"cache_hit_rate:{stats['cache']['hit_rate_pct']}%",
+                f"cache_memory:{stats['cache']['hot_cache_bytes']}",
+            ]
+            return '\n'.join(lines)
+
+        elif cmd == 'AUTH':
+            # Placeholder - auth handled at connection level
+            return "OK"
+
+        elif cmd == 'MULTI':
+            return "OK"  # Transaction placeholder
+
+        elif cmd == 'EXEC':
+            return []  # Transaction placeholder
+
+        elif cmd == 'DISCARD':
+            return "OK"
+
+        elif cmd == 'SUBSCRIBE':
+            return "OK"  # PubSub placeholder
+
+        elif cmd == 'PUBLISH':
+            return 0  # PubSub placeholder
+
+        else:
+            raise ValueError(f"unknown command '{cmd}'")

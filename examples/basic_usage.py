@@ -11,7 +11,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ignisdb_v2 import DB, Server
+from ignisdb import DB, Server
 
 
 async def embedded_example():
@@ -71,7 +71,7 @@ async def server_example():
     print("Connect with: telnet localhost 6380")
     print("Or use any Redis-compatible client\n")
     
-    from ignisdb_v2.engine import LSMEngine
+    from ignisdb.engine import LSMEngine
     
     engine = LSMEngine('/tmp/ignisdb_server')
     await engine.open()

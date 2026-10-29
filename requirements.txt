@@ -1,3 +1,1 @@
-websockets
-pytest
-pytest-asyncio
+# IgnisDB v2 has no runtime dependencies.

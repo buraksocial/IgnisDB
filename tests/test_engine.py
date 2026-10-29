@@ -3,7 +3,7 @@ import pytest
 import pytest_asyncio
 import tempfile
 import asyncio
-from ignisdb_v2.engine import LSMEngine, DB
+from ignisdb.engine import LSMEngine, DB
 
 
 @pytest.fixture
